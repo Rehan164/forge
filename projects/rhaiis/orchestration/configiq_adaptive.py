@@ -88,16 +88,12 @@ def _line_fit(xs: Sequence[float], ys: Sequence[float]) -> tuple[float, float, f
     y_mean = sum(ys) / len(ys)
     denominator = sum((x - x_mean) ** 2 for x in xs)
     slope = (
-        sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys, strict=True))
-        / denominator
+        sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys, strict=True)) / denominator
         if denominator
         else 0.0
     )
     intercept = y_mean - slope * x_mean
-    error = sum(
-        (y - (intercept + slope * x)) ** 2
-        for x, y in zip(xs, ys, strict=True)
-    )
+    error = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys, strict=True))
     return intercept, slope, error
 
 
@@ -109,9 +105,7 @@ def _prepare_points(
         raise ValueError("Concurrency and throughput lists must have the same length")
 
     by_concurrency: dict[float, list[float]] = {}
-    for concurrency, throughput in zip(
-        concurrencies, output_throughputs, strict=True
-    ):
+    for concurrency, throughput in zip(concurrencies, output_throughputs, strict=True):
         if throughput is None:
             continue
         concurrency_value = float(concurrency)
@@ -329,9 +323,7 @@ def extract_guidellm_saturation(report: dict) -> GuideLLMSaturationResult:
         )
 
     sorted_points = tuple(sorted(points, key=lambda point: point.concurrency))
-    available_points = [
-        point for point in sorted_points if point.is_over_saturated is not None
-    ]
+    available_points = [point for point in sorted_points if point.is_over_saturated is not None]
     if not available_points:
         return GuideLLMSaturationResult(
             status="unavailable",
@@ -339,9 +331,7 @@ def extract_guidellm_saturation(report: dict) -> GuideLLMSaturationResult:
             points=sorted_points,
         )
 
-    oversaturated_points = [
-        point for point in available_points if point.is_over_saturated is True
-    ]
+    oversaturated_points = [point for point in available_points if point.is_over_saturated is True]
     if not oversaturated_points:
         return GuideLLMSaturationResult(
             status="not_detected",
@@ -365,8 +355,7 @@ def extract_guidellm_saturation(report: dict) -> GuideLLMSaturationResult:
         return GuideLLMSaturationResult(
             status="inconsistent",
             reason=(
-                "GuideLLM reported a safe concurrency above its first over-saturated "
-                "concurrency"
+                "GuideLLM reported a safe concurrency above its first over-saturated concurrency"
             ),
             points=sorted_points,
             previous_safe_concurrency=previous_safe,

@@ -160,11 +160,7 @@ class GuideLLMSaturationTests(unittest.TestCase):
 
     def test_reads_end_processing_constraint_snapshot(self) -> None:
         result = extract_guidellm_saturation(
-            {
-                "benchmarks": [
-                    _benchmark(100, True, constraint_group="end_processing_constraints")
-                ]
-            }
+            {"benchmarks": [_benchmark(100, True, constraint_group="end_processing_constraints")]}
         )
 
         self.assertEqual(result.status, "detected")
@@ -178,9 +174,9 @@ class GuideLLMSaturationTests(unittest.TestCase):
 
     def test_rejects_malformed_detector_metadata(self) -> None:
         benchmark = _benchmark(50, False)
-        metadata = benchmark["scheduler_state"]["scheduler_constraints"][
-            "over_saturation"
-        ]["metadata"]
+        metadata = benchmark["scheduler_state"]["scheduler_constraints"]["over_saturation"][
+            "metadata"
+        ]
         metadata["is_over_saturated"] = "false"
 
         with self.assertRaisesRegex(ValueError, "boolean"):
@@ -305,9 +301,7 @@ class ConfigIQReportAnalysisTests(unittest.TestCase):
         is_over_saturated: bool,
     ) -> dict:
         benchmark = _benchmark(concurrency, is_over_saturated)
-        benchmark["metrics"] = {
-            "output_tokens_per_second": {"successful": {"mean": throughput}}
-        }
+        benchmark["metrics"] = {"output_tokens_per_second": {"successful": {"mean": throughput}}}
         return benchmark
 
 
