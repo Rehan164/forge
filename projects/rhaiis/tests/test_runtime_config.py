@@ -31,9 +31,10 @@ class GuideLLMArgumentTests(unittest.TestCase):
             over_saturation={"min_seconds": 60, "enabled": False},
         )
 
-        self.assertIn(
-            '--over-saturation={"enabled":false,"min_seconds":60}',
-            args,
+        saturation_arg_index = args.index("--over-saturation")
+        self.assertEqual(
+            args[saturation_arg_index + 1],
+            '{"enabled":false,"min_seconds":60}',
         )
         self.assertIn("--max-seconds=450", args)
 

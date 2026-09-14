@@ -221,7 +221,7 @@ def build_guidellm_args(
         guidellm_args.append(f"--rampup={rampup}")
     if over_saturation is not None:
         serialized = json.dumps(over_saturation, separators=(",", ":"), sort_keys=True)
-        guidellm_args.append(f"--over-saturation={serialized}")
+        guidellm_args.extend(["--over-saturation", serialized])
     return guidellm_args
 
 
