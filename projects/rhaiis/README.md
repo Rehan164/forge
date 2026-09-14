@@ -513,6 +513,9 @@ Full list: `grep "^[a-z]" orchestration/config.d/models.yaml`
 | `configiq` | 1000 | 1000 | 1, 2, 5, 10, 25, 50, 75, 100, 200, 300 | 450 |
 
 The `configiq` profile retains the standard one-time deployment warmup before the sweep.
+It also runs GuideLLM's over-saturation detector in non-enforcing monitor mode. The
+monitor records its final concurrency and TTFT slope evidence without shortening the
+450-second measurements.
 
 ## Presets
 

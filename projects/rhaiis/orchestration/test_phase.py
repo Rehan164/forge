@@ -412,6 +412,9 @@ def _run_workload_benchmark(
     rates = workload.get("rates", [1])
     max_seconds = workload.get("max_seconds", 180)
     rampup = workload.get("rampup")
+    over_saturation = runtime_config.build_guidellm_saturation_monitor(
+        workload.get("saturation_monitor")
+    )
 
     from projects.core.library import config
     from projects.guidellm.toolbox.run_guidellm_benchmark.main import (
@@ -463,6 +466,7 @@ def _run_workload_benchmark(
                 rates=rates,
                 max_seconds=max_seconds,
                 rampup=rampup,
+                over_saturation=over_saturation,
             )
 
             run_guidellm_benchmark(
