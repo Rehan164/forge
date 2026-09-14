@@ -43,8 +43,7 @@ profile7:
 configiq:
   data: "prompt_tokens=1000,output_tokens=1000"
   rates: [1, 2, 5, 10, 25, 50, 75, 100, 200, 300]
-  max_seconds: 120
-  warmup: 15
+  max_seconds: 450
 
 # Dashboard override stub (set data, rates, max_seconds at runtime)
 custom:

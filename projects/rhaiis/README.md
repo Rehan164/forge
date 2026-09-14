@@ -504,16 +504,15 @@ Full list: `grep "^[a-z]" orchestration/config.d/models.yaml`
 
 ## Workload profiles
 
-| Key | Prompt tokens | Output tokens | Rates | Max seconds | Per-rate warmup |
-|-----|--------------|---------------|-------|-------------|-----------------|
-| `profile1` | 1000 | 1000 | 1, 50, 100, 200, 300 | 450 | — |
-| `profile2` | 512 (stdev 128) | 2048 (stdev 512) | 1, 50, 100, 200, 300 | 450 | — |
-| `profile3` | 2048 | 128 | 1, 50, 100, 200, 300 | 450 | — |
-| `profile4` | 8000 | 1000 | 1, 25, 50, 75, 100 | 450 | — |
-| `configiq` | 1000 | 1000 | 1, 2, 5, 10, 25, 50, 75, 100, 200, 300 | 120 | 15 seconds |
+| Key | Prompt tokens | Output tokens | Rates | Max seconds |
+|-----|--------------|---------------|-------|-------------|
+| `profile1` | 1000 | 1000 | 1, 50, 100, 200, 300 | 450 |
+| `profile2` | 512 (stdev 128) | 2048 (stdev 512) | 1, 50, 100, 200, 300 | 450 |
+| `profile3` | 2048 | 128 | 1, 50, 100, 200, 300 | 450 |
+| `profile4` | 8000 | 1000 | 1, 25, 50, 75, 100 | 450 |
+| `configiq` | 1000 | 1000 | 1, 2, 5, 10, 25, 50, 75, 100, 200, 300 | 450 |
 
 The `configiq` profile retains the standard one-time deployment warmup before the sweep.
-GuideLLM also excludes the first 15 seconds of each 120-second concurrency run as warmup.
 
 ## Presets
 

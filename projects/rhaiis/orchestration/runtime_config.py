@@ -191,7 +191,6 @@ def build_guidellm_args(
     rates: list[int],
     max_seconds: int,
     rampup: int | None = None,
-    warmup: int | None = None,
 ) -> list[str]:
     guidellm_args = []
     for key, value in benchmark_cfg.get("args", {}).items():
@@ -204,8 +203,6 @@ def build_guidellm_args(
     guidellm_args.append(f"--max-seconds={max_seconds}")
     if rampup is not None:
         guidellm_args.append(f"--rampup={rampup}")
-    if warmup is not None:
-        guidellm_args.append(f"--warmup={warmup}")
     return guidellm_args
 
 
