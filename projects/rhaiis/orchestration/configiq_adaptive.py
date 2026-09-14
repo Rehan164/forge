@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-
 MIN_POINTS = 5
 MAX_TAIL_SLOPE_RATIO = 0.25
 MIN_FIT_IMPROVEMENT = 0.50
@@ -89,12 +88,16 @@ def _line_fit(xs: Sequence[float], ys: Sequence[float]) -> tuple[float, float, f
     y_mean = sum(ys) / len(ys)
     denominator = sum((x - x_mean) ** 2 for x in xs)
     slope = (
-        sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys)) / denominator
+        sum((x - x_mean) * (y - y_mean) for x, y in zip(xs, ys, strict=True))
+        / denominator
         if denominator
         else 0.0
     )
     intercept = y_mean - slope * x_mean
-    error = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    error = sum(
+        (y - (intercept + slope * x)) ** 2
+        for x, y in zip(xs, ys, strict=True)
+    )
     return intercept, slope, error
 
 
@@ -106,7 +109,9 @@ def _prepare_points(
         raise ValueError("Concurrency and throughput lists must have the same length")
 
     by_concurrency: dict[float, list[float]] = {}
-    for concurrency, throughput in zip(concurrencies, output_throughputs):
+    for concurrency, throughput in zip(
+        concurrencies, output_throughputs, strict=True
+    ):
         if throughput is None:
             continue
         concurrency_value = float(concurrency)

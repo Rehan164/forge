@@ -10,7 +10,6 @@ from projects.rhaiis.orchestration.configiq_adaptive import (
     find_throughput_knee,
 )
 
-
 CONCURRENCIES = [1, 10, 20, 30, 40, 50, 60]
 
 
