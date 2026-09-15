@@ -57,6 +57,9 @@ configiq:
     enabled: false
     points_each_side: 5
     max_step: 5
+    reuse:
+      enabled: false
+      run_uuid: ""
 
 # Dashboard override stub (set data, rates, max_seconds at runtime)
 custom:

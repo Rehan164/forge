@@ -20,6 +20,9 @@ from projects.rhaiis.orchestration.configiq_adaptive import (
     find_throughput_knee,
     generate_adaptive_rate_plan,
     locate_guidellm_report,
+    locate_reused_guidellm_report,
+    tier1_reuse_config,
+    validate_and_analyze_reused_tier1_report,
 )
 
 CONCURRENCIES = [1, 10, 20, 30, 40, 50, 60]
@@ -346,6 +349,44 @@ class AdaptivePassConfigurationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "positive integer"):
                     adaptive_rate_options({"adaptive_pass": {name: value}})
 
+    def test_tier1_reuse_defaults_to_disabled(self) -> None:
+        result = tier1_reuse_config({})
+
+        self.assertFalse(result.enabled)
+        self.assertIsNone(result.run_uuid)
+
+    def test_tier1_reuse_accepts_run_uuid(self) -> None:
+        run_uuid = "12345678-1234-5678-9234-567812345678"
+        result = tier1_reuse_config(
+            {
+                "adaptive_pass": {
+                    "reuse": {
+                        "enabled": True,
+                        "run_uuid": run_uuid,
+                    }
+                }
+            }
+        )
+
+        self.assertTrue(result.enabled)
+        self.assertEqual(result.run_uuid, run_uuid)
+
+    def test_tier1_reuse_requires_uuid_when_enabled(self) -> None:
+        with self.assertRaisesRegex(ValueError, "run_uuid is required"):
+            tier1_reuse_config({"adaptive_pass": {"reuse": {"enabled": True}}})
+
+    def test_tier1_reuse_rejects_invalid_uuid(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be a valid UUID"):
+            tier1_reuse_config(
+                {"adaptive_pass": {"reuse": {"enabled": True, "run_uuid": "not-a-uuid"}}}
+            )
+
+    def test_tier1_reuse_requires_typed_mapping(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reuse must be a mapping"):
+            tier1_reuse_config({"adaptive_pass": {"reuse": True}})
+        with self.assertRaisesRegex(ValueError, "enabled must be a boolean"):
+            tier1_reuse_config({"adaptive_pass": {"reuse": {"enabled": "true"}}})
+
 
 class AdaptiveRatePlanTests(unittest.TestCase):
     TIER1_RATES = [1, 2, 5, 10, 25, 50, 75, 100, 200, 300]
@@ -500,7 +541,7 @@ class ConfigIQReportFileTests(unittest.TestCase):
 
         self.assertEqual(located_path, report_path)
         self.assertEqual(analysis.assessment.status, "corroborated")
-        self.assertEqual(artifact["schema_version"], 2)
+        self.assertEqual(artifact["schema_version"], 3)
         self.assertEqual(
             artifact["reports"]["tier1"],
             "001__run_guidellm_benchmark/artifacts/results/benchmarks.json",
@@ -513,6 +554,7 @@ class ConfigIQReportFileTests(unittest.TestCase):
         self.assertEqual(artifact["guidellm"]["status"], "detected")
         self.assertEqual(artifact["assessment"]["status"], "corroborated")
         self.assertEqual(artifact["adaptive_rate_plan"]["rates"], (35,))
+        self.assertIsNone(artifact["tier1_reuse"])
 
     def test_analysis_artifact_requires_tier1_report(self) -> None:
         analysis = analyze_guidellm_report(
@@ -554,6 +596,92 @@ class ConfigIQReportFileTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "Expected one"):
                 locate_guidellm_report(benchmark_dir)
+
+
+class ReusedTier1ReportTests(unittest.TestCase):
+    RATES = [1, 10, 20, 30, 40, 50, 60]
+    MODEL_ID = "example/gemma"
+    DATA = "prompt_tokens=1000,output_tokens=1000"
+
+    def _report(self) -> dict:
+        return {
+            "args": {
+                "data": [self.DATA],
+                "backend_kwargs": {"model": self.MODEL_ID},
+            },
+            "benchmarks": [
+                ConfigIQReportAnalysisTests._benchmark_with_throughput(
+                    concurrency,
+                    throughput,
+                    concurrency >= 40,
+                )
+                for concurrency, throughput in zip(
+                    self.RATES,
+                    [1, 10, 20, 30, 30, 30, 30],
+                    strict=True,
+                )
+            ],
+        }
+
+    def _write_report(self, directory: str, report: dict | None = None) -> Path:
+        report_path = Path(directory) / "download" / "benchmarks.json"
+        report_path.parent.mkdir(parents=True)
+        report_path.write_text(json.dumps(report or self._report()), encoding="utf-8")
+        return report_path
+
+    def test_validates_and_analyzes_matching_report(self) -> None:
+        with TemporaryDirectory() as directory:
+            report_path = self._write_report(directory)
+
+            located_path = locate_reused_guidellm_report(Path(directory))
+            analysis = validate_and_analyze_reused_tier1_report(
+                located_path,
+                model_id=self.MODEL_ID,
+                data=self.DATA,
+                tier1_rates=self.RATES,
+            )
+
+        self.assertEqual(report_path, located_path)
+        self.assertEqual(analysis.throughput.status, "ok")
+
+    def test_rejects_mismatched_model_data_and_rates(self) -> None:
+        with TemporaryDirectory() as directory:
+            report_path = self._write_report(directory)
+
+            with self.assertRaisesRegex(ValueError, "model mismatch"):
+                validate_and_analyze_reused_tier1_report(
+                    report_path,
+                    model_id="different/model",
+                    data=self.DATA,
+                    tier1_rates=self.RATES,
+                )
+            with self.assertRaisesRegex(ValueError, "data mismatch"):
+                validate_and_analyze_reused_tier1_report(
+                    report_path,
+                    model_id=self.MODEL_ID,
+                    data="prompt_tokens=500,output_tokens=500",
+                    tier1_rates=self.RATES,
+                )
+            with self.assertRaisesRegex(ValueError, "concurrency mismatch"):
+                validate_and_analyze_reused_tier1_report(
+                    report_path,
+                    model_id=self.MODEL_ID,
+                    data=self.DATA,
+                    tier1_rates=[1, 10],
+                )
+
+    def test_reused_report_locator_requires_exactly_one_report(self) -> None:
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(FileNotFoundError, "No reused"):
+                locate_reused_guidellm_report(Path(directory))
+
+            self._write_report(directory)
+            second_report = Path(directory) / "second" / "benchmarks.json"
+            second_report.parent.mkdir(parents=True)
+            second_report.write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Expected one reused"):
+                locate_reused_guidellm_report(Path(directory))
 
 
 if __name__ == "__main__":

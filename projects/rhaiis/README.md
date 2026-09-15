@@ -532,6 +532,23 @@ be changed with `workloads.configiq.adaptive_pass.points_each_side` and
 `workloads.configiq.adaptive_pass.max_step`. If the analysis cannot safely generate a
 plan, it records the reason and skips the adaptive benchmark.
 
+To skip the Tier 1 benchmark and reuse a completed Tier 1 report, provide the FORGE run
+UUID shown in the original job logs and ConfigIQ test labels:
+
+```yaml
+workloads.configiq.adaptive_pass.enabled: true
+workloads.configiq.adaptive_pass.reuse.enabled: true
+workloads.configiq.adaptive_pass.reuse.run_uuid: "<prior ConfigIQ run UUID>"
+```
+
+FORGE searches the configured `forge-rhaiis` MLflow experiment for the unique child run
+having that `run_uuid` and `configiq_pass: tier1`, downloads its artifacts with the existing
+MLflow vault configuration, stores the report under a `tier1-reused` test node, and labels
+it with `configiq_data_source: reused`. Before using it, FORGE requires the model ID,
+ConfigIQ data shape, and complete Tier 1 concurrency grid to match the current job. The
+model is still deployed and warmed up because the new adaptive benchmark runs against the
+current deployment.
+
 ## Presets
 
 Presets in `presets.d/presets.yaml` provide shortcuts for common configurations:

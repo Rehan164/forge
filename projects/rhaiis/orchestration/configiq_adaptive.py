@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
+from uuid import UUID
 
 MIN_POINTS = 5
 MAX_TAIL_SLOPE_RATIO = 0.25
@@ -98,22 +99,40 @@ class AdaptiveRatePlan:
     excluded_tier1_rates: tuple[int, ...] = ()
 
 
+@dataclass(frozen=True)
+class Tier1ReuseConfig:
+    """Source configuration for reusing a prior ConfigIQ Tier 1 report."""
+
+    enabled: bool
+    run_uuid: str | None = None
+
+
+@dataclass(frozen=True)
+class Tier1ReuseProvenance:
+    """Resolved identity of a reused ConfigIQ Tier 1 report."""
+
+    run_uuid: str
+    mlflow_run_id: str
+
+
 def build_saturation_analysis_artifact(
     analysis: ConfigIQSaturationAnalysis,
     *,
     tier1_report: str,
     adaptive_rate_plan: AdaptiveRatePlan,
     adaptive_report: str | None = None,
+    tier1_reuse: Tier1ReuseProvenance | None = None,
 ) -> dict:
     """Build the public artifact describing a ConfigIQ Tier 1 analysis."""
     if not tier1_report:
         raise ValueError("ConfigIQ analysis artifact requires a Tier 1 report path")
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "reports": {
             "tier1": tier1_report,
             "adaptive": adaptive_report,
         },
+        "tier1_reuse": asdict(tier1_reuse) if tier1_reuse is not None else None,
         "adaptive_rate_plan": asdict(adaptive_rate_plan),
         **asdict(analysis),
     }
@@ -146,6 +165,33 @@ def adaptive_rate_options(workload: dict) -> tuple[int, int]:
         if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
             raise ValueError(f"ConfigIQ adaptive_pass.{name} must be a positive integer")
     return points_each_side, max_step
+
+
+def tier1_reuse_config(workload: dict) -> Tier1ReuseConfig:
+    """Return validated configuration for an existing Tier 1 report."""
+    adaptive_pass = workload.get("adaptive_pass", {})
+    if not isinstance(adaptive_pass, dict):
+        raise ValueError("ConfigIQ adaptive_pass must be a mapping")
+    reuse = adaptive_pass.get("reuse", {})
+    if not isinstance(reuse, dict):
+        raise ValueError("ConfigIQ adaptive_pass.reuse must be a mapping")
+
+    enabled = reuse.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("ConfigIQ adaptive_pass.reuse.enabled must be a boolean")
+    run_uuid = reuse.get("run_uuid")
+    if run_uuid is not None and not isinstance(run_uuid, str):
+        raise ValueError("ConfigIQ adaptive_pass.reuse.run_uuid must be a string")
+    if enabled and not run_uuid:
+        raise ValueError("ConfigIQ adaptive_pass.reuse.run_uuid is required when reuse is enabled")
+    if run_uuid:
+        try:
+            run_uuid = str(UUID(run_uuid))
+        except ValueError as error:
+            raise ValueError(
+                "ConfigIQ adaptive_pass.reuse.run_uuid must be a valid UUID"
+            ) from error
+    return Tier1ReuseConfig(enabled=enabled, run_uuid=run_uuid or None)
 
 
 def generate_adaptive_rate_plan(
@@ -651,3 +697,55 @@ def analyze_guidellm_report_file(report_path: Path) -> ConfigIQSaturationAnalysi
     if not isinstance(report, dict):
         raise ValueError(f"GuideLLM report must be a JSON object: {report_path}")
     return analyze_guidellm_report(report)
+
+
+def validate_and_analyze_reused_tier1_report(
+    report_path: Path,
+    *,
+    model_id: str,
+    data: str,
+    tier1_rates: Sequence[int],
+) -> ConfigIQSaturationAnalysis:
+    """Validate a reused report's identity and analyze its saturation curve."""
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise ValueError(f"GuideLLM report must be a JSON object: {report_path}")
+
+    args = report.get("args")
+    if not isinstance(args, dict):
+        raise ValueError("Reused Tier 1 report must contain GuideLLM args")
+    backend_kwargs = args.get("backend_kwargs")
+    report_model = backend_kwargs.get("model") if isinstance(backend_kwargs, dict) else None
+    if report_model != model_id:
+        raise ValueError(
+            f"Reused Tier 1 model mismatch: expected {model_id!r}, found {report_model!r}"
+        )
+
+    report_data = args.get("data")
+    if report_data != [data]:
+        raise ValueError(f"Reused Tier 1 data mismatch: expected {[data]!r}, found {report_data!r}")
+
+    concurrencies, _ = _extract_throughput_curve(report)
+    expected_rates = sorted(float(rate) for rate in tier1_rates)
+    if sorted(concurrencies) != expected_rates:
+        raise ValueError(
+            "Reused Tier 1 concurrency mismatch: "
+            f"expected {expected_rates!r}, found {sorted(concurrencies)!r}"
+        )
+    return analyze_guidellm_report(report)
+
+
+def locate_reused_guidellm_report(reuse_artifact_dir: Path) -> Path:
+    """Locate exactly one downloaded GuideLLM benchmarks.json report."""
+    matches = sorted(reuse_artifact_dir.rglob("benchmarks.json"))
+    if not matches:
+        raise FileNotFoundError(
+            f"No reused GuideLLM benchmarks.json found under {reuse_artifact_dir}"
+        )
+    if len(matches) > 1:
+        paths = ", ".join(str(path) for path in matches)
+        raise RuntimeError(
+            f"Expected one reused GuideLLM benchmarks.json under {reuse_artifact_dir}; "
+            f"found {len(matches)}: {paths}"
+        )
+    return matches[0]

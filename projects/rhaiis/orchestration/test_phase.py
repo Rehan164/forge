@@ -419,6 +419,11 @@ def _run_workload_benchmark(
     adaptive_enabled = workload_key == "configiq" and configiq_adaptive.adaptive_pass_enabled(
         workload
     )
+    reuse_config = (
+        configiq_adaptive.tier1_reuse_config(workload) if workload_key == "configiq" else None
+    )
+    if reuse_config is not None and reuse_config.enabled and not adaptive_enabled:
+        raise ValueError("ConfigIQ Tier 1 reuse requires adaptive_pass.enabled=true")
 
     from projects.core.library import config
     from projects.guidellm.toolbox.run_guidellm_benchmark.main import (
@@ -431,7 +436,11 @@ def _run_workload_benchmark(
     with env.NextArtifactDir(f"benchmark_{workload_key}"):
         benchmark_artifact_dir = Path(env.ARTIFACT_DIR)
 
-        def create_test_labels(*, configiq_pass: str | None = None) -> None:
+        def create_test_labels(
+            *,
+            configiq_pass: str | None = None,
+            configiq_data_source: str | None = None,
+        ) -> None:
             _create_test_labels(
                 model_key,
                 workload_key,
@@ -446,6 +455,7 @@ def _run_workload_benchmark(
                 trtllm_config=trtllm_config,
                 mlflow_destination=mlflow_destination,
                 configiq_pass=configiq_pass,
+                configiq_data_source=configiq_data_source,
             )
 
         if not run_benchmark:
@@ -492,13 +502,53 @@ def _run_workload_benchmark(
                 )
 
             if adaptive_enabled:
-                with env.NextArtifactDir("tier1"):
-                    tier1_artifact_dir = Path(env.ARTIFACT_DIR)
-                    create_test_labels(configiq_pass="tier1")
-                    run_guidellm_pass(pass_rates=rates, job_prefix="guidellm-bench")
+                if reuse_config is None:
+                    raise RuntimeError("ConfigIQ adaptive pass is missing its reuse configuration")
+                reuse_provenance = None
+                if reuse_config.enabled:
+                    from projects.rhaiis.orchestration.configiq_reuse import (
+                        download_tier1_report_by_uuid,
+                    )
 
-                report_path = configiq_adaptive.locate_guidellm_report(tier1_artifact_dir)
-                analysis = configiq_adaptive.analyze_guidellm_report_file(report_path)
+                    with env.NextArtifactDir("tier1-reused"):
+                        tier1_artifact_dir = Path(env.ARTIFACT_DIR)
+                        create_test_labels(
+                            configiq_pass="tier1",
+                            configiq_data_source="reused",
+                        )
+                        reuse_output_dir = tier1_artifact_dir / "artifacts" / "reused-report"
+                        if reuse_config.run_uuid is None:
+                            raise RuntimeError("ConfigIQ Tier 1 reuse is missing its run UUID")
+                        resolved_mlflow_run_id = download_tier1_report_by_uuid(
+                            run_uuid=reuse_config.run_uuid,
+                            output_dir=reuse_output_dir,
+                        )
+                        reuse_provenance = configiq_adaptive.Tier1ReuseProvenance(
+                            run_uuid=reuse_config.run_uuid,
+                            mlflow_run_id=resolved_mlflow_run_id,
+                        )
+
+                    report_path = configiq_adaptive.locate_reused_guidellm_report(
+                        tier1_artifact_dir
+                    )
+                    analysis = configiq_adaptive.validate_and_analyze_reused_tier1_report(
+                        report_path,
+                        model_id=model_cfg["hf_model_id"],
+                        data=workload["data"],
+                        tier1_rates=rates,
+                    )
+                    logger.info("Reused ConfigIQ Tier 1 report: %s", report_path)
+                else:
+                    with env.NextArtifactDir("tier1"):
+                        tier1_artifact_dir = Path(env.ARTIFACT_DIR)
+                        create_test_labels(
+                            configiq_pass="tier1",
+                            configiq_data_source="measured",
+                        )
+                        run_guidellm_pass(pass_rates=rates, job_prefix="guidellm-bench")
+
+                    report_path = configiq_adaptive.locate_guidellm_report(tier1_artifact_dir)
+                    analysis = configiq_adaptive.analyze_guidellm_report_file(report_path)
                 points_each_side, max_step = configiq_adaptive.adaptive_rate_options(workload)
                 adaptive_rate_plan = configiq_adaptive.generate_adaptive_rate_plan(
                     analysis,
@@ -515,6 +565,7 @@ def _run_workload_benchmark(
                         analysis,
                         tier1_report=str(report_path.relative_to(benchmark_artifact_dir)),
                         adaptive_rate_plan=adaptive_rate_plan,
+                        tier1_reuse=reuse_provenance,
                     ),
                 )
                 logger.info(
@@ -543,7 +594,10 @@ def _run_workload_benchmark(
                     )
                     with env.NextArtifactDir("adaptive"):
                         adaptive_artifact_dir = Path(env.ARTIFACT_DIR)
-                        create_test_labels(configiq_pass="adaptive")
+                        create_test_labels(
+                            configiq_pass="adaptive",
+                            configiq_data_source="measured",
+                        )
                         run_guidellm_pass(
                             pass_rates=list(adaptive_rate_plan.rates),
                             job_prefix="guidellm-adaptive",
@@ -560,6 +614,7 @@ def _run_workload_benchmark(
                             adaptive_report=str(
                                 adaptive_report_path.relative_to(benchmark_artifact_dir)
                             ),
+                            tier1_reuse=reuse_provenance,
                         ),
                     )
                     logger.info(
@@ -593,6 +648,7 @@ def _create_test_labels(
     trtllm_config: dict | None = None,
     mlflow_destination: dict[str, str] | None = None,
     configiq_pass: str | None = None,
+    configiq_data_source: str | None = None,
 ) -> None:
     _, image_tag = runtime_config.split_image_tag(serving_image) if serving_image else ("", "")
     parts = [f"{k}: {v}" for k, v in engine_args.items()]
@@ -622,6 +678,8 @@ def _create_test_labels(
     }
     if configiq_pass is not None:
         labels["configiq_pass"] = configiq_pass
+    if configiq_data_source is not None:
+        labels["configiq_data_source"] = configiq_data_source
 
     write_test_labels(
         env.ARTIFACT_DIR,
