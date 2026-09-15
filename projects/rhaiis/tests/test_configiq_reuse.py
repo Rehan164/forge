@@ -1,4 +1,5 @@
 import os
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,6 +26,9 @@ class ConfigIQReuseMLflowTests(unittest.TestCase):
         client.search_runs.return_value = [
             SimpleNamespace(info=SimpleNamespace(run_id="tier1-child-run"))
         ]
+        mlflow_module = MagicMock()
+        mlflow_module.tracking.MlflowClient.return_value = client
+        mlflow_module.get_tracking_uri.return_value = "https://previous.example"
 
         with TemporaryDirectory() as directory:
             secret_path = Path(directory) / "mlflow-secret.yaml"
@@ -39,9 +43,7 @@ class ConfigIQReuseMLflowTests(unittest.TestCase):
                         "get_vault_content_path",
                         return_value=secret_path,
                     ),
-                    patch("mlflow.tracking.MlflowClient", return_value=client),
-                    patch("mlflow.get_tracking_uri", return_value="https://previous.example"),
-                    patch("mlflow.set_tracking_uri") as set_tracking_uri,
+                    patch.dict(sys.modules, {"mlflow": mlflow_module}),
                     patch.object(configiq_reuse, "run_artifacts_import") as artifact_import,
                 ):
                     resolved_run_id = configiq_reuse.download_tier1_report_by_uuid.__wrapped__(
@@ -73,7 +75,7 @@ class ConfigIQReuseMLflowTests(unittest.TestCase):
         )
         self.assertEqual(restored_workspace, "original-workspace")
         self.assertEqual(
-            set_tracking_uri.call_args_list[-1].args[0],
+            mlflow_module.set_tracking_uri.call_args_list[-1].args[0],
             "https://previous.example",
         )
 
@@ -93,6 +95,9 @@ class ConfigIQReuseMLflowTests(unittest.TestCase):
                 client = MagicMock()
                 client.get_experiment_by_name.return_value = SimpleNamespace(experiment_id="42")
                 client.search_runs.return_value = runs
+                mlflow_module = MagicMock()
+                mlflow_module.tracking.MlflowClient.return_value = client
+                mlflow_module.get_tracking_uri.return_value = ""
                 with TemporaryDirectory() as directory:
                     secret_path = Path(directory) / "mlflow-secret.yaml"
                     secret_path.write_text(
@@ -105,9 +110,7 @@ class ConfigIQReuseMLflowTests(unittest.TestCase):
                             "get_vault_content_path",
                             return_value=secret_path,
                         ),
-                        patch("mlflow.tracking.MlflowClient", return_value=client),
-                        patch("mlflow.get_tracking_uri", return_value=""),
-                        patch("mlflow.set_tracking_uri"),
+                        patch.dict(sys.modules, {"mlflow": mlflow_module}),
                         patch.object(configiq_reuse, "run_artifacts_import"),
                     ):
                         with self.assertRaisesRegex(error_type, message):
