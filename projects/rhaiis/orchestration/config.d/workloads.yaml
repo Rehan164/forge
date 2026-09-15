@@ -53,6 +53,10 @@ configiq:
     maximum_window_ratio: 0.75
     minimum_window_size: 5
     confidence: 0.95
+  adaptive_pass:
+    enabled: false
+    points_each_side: 5
+    max_step: 5
 
 # Dashboard override stub (set data, rates, max_seconds at runtime)
 custom:

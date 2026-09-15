@@ -517,6 +517,21 @@ It also runs GuideLLM's over-saturation detector in non-enforcing monitor mode. 
 monitor records its final concurrency and TTFT slope evidence without shortening the
 450-second measurements.
 
+Set `workloads.configiq.adaptive_pass.enabled: true` to analyze the completed ConfigIQ
+sweep and run a second GuideLLM benchmark at the generated rates. Both benchmarks run
+sequentially against the same deployment and are stored under the same `benchmark_configiq`
+workload directory, in separate `tier1` and `adaptive` test nodes. Their Caliper labels retain
+`workload_key: configiq` and add `configiq_pass: tier1` or `configiq_pass: adaptive`. The
+complete result is saved as
+`benchmark_configiq/artifacts/configiq-saturation-analysis.json`, with relative paths to
+the Tier 1 and adaptive `benchmarks.json` reports included for provenance. The result also
+contains an `adaptive_rate_plan`: up to five unmeasured concurrency points on either side
+of the selected saturation region. The generator uses a maximum step of five, reduces the
+step near low concurrency, and excludes rates already measured by Tier 1. Its defaults can
+be changed with `workloads.configiq.adaptive_pass.points_each_side` and
+`workloads.configiq.adaptive_pass.max_step`. If the analysis cannot safely generate a
+plan, it records the reason and skips the adaptive benchmark.
+
 ## Presets
 
 Presets in `presets.d/presets.yaml` provide shortcuts for common configurations:

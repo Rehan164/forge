@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Literal
 
 MIN_POINTS = 5
@@ -80,6 +82,161 @@ class ConfigIQSaturationAnalysis:
     throughput: KneeResult
     guidellm: GuideLLMSaturationResult
     assessment: SaturationAssessment
+
+
+@dataclass(frozen=True)
+class AdaptiveRatePlan:
+    """Concurrency rates selected for the ConfigIQ adaptive benchmark."""
+
+    status: Literal["ready", "skipped"]
+    reason: str
+    rates: tuple[int, ...] = ()
+    selection_center: float | None = None
+    anchor: int | None = None
+    step: int | None = None
+    candidate_rates: tuple[int, ...] = ()
+    excluded_tier1_rates: tuple[int, ...] = ()
+
+
+def build_saturation_analysis_artifact(
+    analysis: ConfigIQSaturationAnalysis,
+    *,
+    tier1_report: str,
+    adaptive_rate_plan: AdaptiveRatePlan,
+    adaptive_report: str | None = None,
+) -> dict:
+    """Build the public artifact describing a ConfigIQ Tier 1 analysis."""
+    if not tier1_report:
+        raise ValueError("ConfigIQ analysis artifact requires a Tier 1 report path")
+    return {
+        "schema_version": 2,
+        "reports": {
+            "tier1": tier1_report,
+            "adaptive": adaptive_report,
+        },
+        "adaptive_rate_plan": asdict(adaptive_rate_plan),
+        **asdict(analysis),
+    }
+
+
+def adaptive_pass_enabled(workload: dict) -> bool:
+    """Return whether ConfigIQ should analyze Tier 1 for an adaptive pass."""
+    adaptive_pass = workload.get("adaptive_pass", {})
+    if not isinstance(adaptive_pass, dict):
+        raise ValueError("ConfigIQ adaptive_pass must be a mapping")
+
+    enabled = adaptive_pass.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ValueError("ConfigIQ adaptive_pass.enabled must be a boolean")
+    return enabled
+
+
+def adaptive_rate_options(workload: dict) -> tuple[int, int]:
+    """Return validated point-count and maximum-step settings."""
+    adaptive_pass = workload.get("adaptive_pass", {})
+    if not isinstance(adaptive_pass, dict):
+        raise ValueError("ConfigIQ adaptive_pass must be a mapping")
+
+    points_each_side = adaptive_pass.get("points_each_side", 5)
+    max_step = adaptive_pass.get("max_step", 5)
+    for name, value in (
+        ("points_each_side", points_each_side),
+        ("max_step", max_step),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"ConfigIQ adaptive_pass.{name} must be a positive integer")
+    return points_each_side, max_step
+
+
+def generate_adaptive_rate_plan(
+    analysis: ConfigIQSaturationAnalysis,
+    tier1_rates: Sequence[int],
+    *,
+    points_each_side: int = 5,
+    max_step: int = 5,
+) -> AdaptiveRatePlan:
+    """Generate unmeasured integer rates around the detected saturation region."""
+    for name, value in (
+        ("points_each_side", points_each_side),
+        ("max_step", max_step),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{name} must be a positive integer")
+
+    measured_rates: set[int] = set()
+    for rate in tier1_rates:
+        if isinstance(rate, bool) or not isinstance(rate, int) or rate <= 0:
+            raise ValueError("Tier 1 rates must be positive integers")
+        measured_rates.add(rate)
+
+    assessment = analysis.assessment
+    if assessment.status in {"disagreement", "no_saturation"}:
+        return AdaptiveRatePlan(
+            status="skipped",
+            reason=f"Cannot safely generate adaptive rates: {assessment.reason}",
+        )
+
+    center = assessment.selection_center
+    if center is None:
+        lower = assessment.refinement_lower
+        upper = assessment.refinement_upper
+        if lower is not None and upper is not None:
+            center = (lower + upper) / 2
+        else:
+            center = upper if upper is not None else lower
+    if center is None:
+        return AdaptiveRatePlan(
+            status="skipped",
+            reason="The saturation assessment did not provide a refinement center or boundary",
+        )
+    if not math.isfinite(center) or center <= 0:
+        raise ValueError("Adaptive rate selection center must be positive and finite")
+
+    # Prefer a clean max-step grid, but reduce the step when that grid would
+    # reach zero. At the very bottom of the integer range, unit spacing may
+    # still yield fewer than the requested number of lower points.
+    step = 1
+    anchor = max(1, math.floor(center + 0.5))
+    for candidate_step in range(max_step, 0, -1):
+        candidate_anchor = max(
+            candidate_step,
+            math.floor(center / candidate_step + 0.5) * candidate_step,
+        )
+        step = candidate_step
+        anchor = candidate_anchor
+        if anchor - points_each_side * step > 0:
+            break
+    candidate_rates = tuple(
+        sorted(
+            {
+                anchor + offset * step
+                for offset in range(-points_each_side, points_each_side + 1)
+                if anchor + offset * step > 0
+            }
+        )
+    )
+    excluded_rates = tuple(rate for rate in candidate_rates if rate in measured_rates)
+    rates = tuple(rate for rate in candidate_rates if rate not in measured_rates)
+    if not rates:
+        return AdaptiveRatePlan(
+            status="skipped",
+            reason="All adaptive candidate rates were already measured by Tier 1",
+            selection_center=center,
+            anchor=anchor,
+            step=step,
+            candidate_rates=candidate_rates,
+            excluded_tier1_rates=excluded_rates,
+        )
+    return AdaptiveRatePlan(
+        status="ready",
+        reason="Generated unmeasured concurrency rates around the saturation region",
+        rates=rates,
+        selection_center=center,
+        anchor=anchor,
+        step=step,
+        candidate_rates=candidate_rates,
+        excluded_tier1_rates=excluded_rates,
+    )
 
 
 def _line_fit(xs: Sequence[float], ys: Sequence[float]) -> tuple[float, float, float]:
@@ -470,3 +627,27 @@ def analyze_guidellm_report(report: dict) -> ConfigIQSaturationAnalysis:
         guidellm=guidellm_result,
         assessment=assess_saturation(throughput_result, guidellm_result),
     )
+
+
+def locate_guidellm_report(benchmark_artifact_dir: Path) -> Path:
+    """Locate the single GuideLLM report produced by one workload benchmark."""
+    matches = sorted(
+        benchmark_artifact_dir.glob("*__run_guidellm_benchmark/artifacts/results/benchmarks.json")
+    )
+    if not matches:
+        raise FileNotFoundError(f"No GuideLLM benchmarks.json found under {benchmark_artifact_dir}")
+    if len(matches) > 1:
+        paths = ", ".join(str(path) for path in matches)
+        raise RuntimeError(
+            f"Expected one GuideLLM benchmarks.json under {benchmark_artifact_dir}; "
+            f"found {len(matches)}: {paths}"
+        )
+    return matches[0]
+
+
+def analyze_guidellm_report_file(report_path: Path) -> ConfigIQSaturationAnalysis:
+    """Load and analyze one GuideLLM report file."""
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise ValueError(f"GuideLLM report must be a JSON object: {report_path}")
+    return analyze_guidellm_report(report)

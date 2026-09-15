@@ -1,13 +1,25 @@
+import json
 import math
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from projects.rhaiis.orchestration.configiq_adaptive import (
+    AdaptiveRatePlan,
+    ConfigIQSaturationAnalysis,
     GuideLLMSaturationResult,
     KneeResult,
+    SaturationAssessment,
+    adaptive_pass_enabled,
+    adaptive_rate_options,
     analyze_guidellm_report,
+    analyze_guidellm_report_file,
     assess_saturation,
+    build_saturation_analysis_artifact,
     extract_guidellm_saturation,
     find_throughput_knee,
+    generate_adaptive_rate_plan,
+    locate_guidellm_report,
 )
 
 CONCURRENCIES = [1, 10, 20, 30, 40, 50, 60]
@@ -303,6 +315,245 @@ class ConfigIQReportAnalysisTests(unittest.TestCase):
         benchmark = _benchmark(concurrency, is_over_saturated)
         benchmark["metrics"] = {"output_tokens_per_second": {"successful": {"mean": throughput}}}
         return benchmark
+
+
+class AdaptivePassConfigurationTests(unittest.TestCase):
+    def test_adaptive_pass_defaults_to_disabled(self) -> None:
+        self.assertFalse(adaptive_pass_enabled({}))
+
+    def test_adaptive_pass_can_be_enabled(self) -> None:
+        self.assertTrue(adaptive_pass_enabled({"adaptive_pass": {"enabled": True}}))
+
+    def test_adaptive_pass_requires_mapping(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be a mapping"):
+            adaptive_pass_enabled({"adaptive_pass": True})
+
+    def test_adaptive_pass_requires_boolean_enabled_value(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be a boolean"):
+            adaptive_pass_enabled({"adaptive_pass": {"enabled": "true"}})
+
+    def test_adaptive_rate_options_have_defaults(self) -> None:
+        self.assertEqual(adaptive_rate_options({}), (5, 5))
+
+    def test_adaptive_rate_options_can_be_configured(self) -> None:
+        workload = {"adaptive_pass": {"points_each_side": 3, "max_step": 2}}
+
+        self.assertEqual(adaptive_rate_options(workload), (3, 2))
+
+    def test_adaptive_rate_options_require_positive_integers(self) -> None:
+        for name, value in (("points_each_side", 0), ("max_step", True)):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    adaptive_rate_options({"adaptive_pass": {name: value}})
+
+
+class AdaptiveRatePlanTests(unittest.TestCase):
+    TIER1_RATES = [1, 2, 5, 10, 25, 50, 75, 100, 200, 300]
+
+    @staticmethod
+    def _analysis(assessment: SaturationAssessment) -> ConfigIQSaturationAnalysis:
+        return ConfigIQSaturationAnalysis(
+            throughput=KneeResult(status="no_knee", reason="test"),
+            guidellm=GuideLLMSaturationResult(
+                status="not_detected",
+                reason="test",
+                points=(),
+            ),
+            assessment=assessment,
+        )
+
+    def test_generates_five_step_rates_around_knee_and_excludes_tier1(self) -> None:
+        analysis = self._analysis(
+            SaturationAssessment(
+                status="throughput_only",
+                reason="test",
+                selection_center=100,
+            )
+        )
+
+        result = generate_adaptive_rate_plan(analysis, self.TIER1_RATES)
+
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.anchor, 100)
+        self.assertEqual(result.step, 5)
+        self.assertEqual(result.candidate_rates, tuple(range(75, 126, 5)))
+        self.assertEqual(result.excluded_tier1_rates, (75, 100))
+        self.assertEqual(result.rates, (80, 85, 90, 95, 105, 110, 115, 120, 125))
+
+    def test_uses_smaller_steps_and_positive_rates_around_low_knee(self) -> None:
+        analysis = self._analysis(
+            SaturationAssessment(
+                status="throughput_only",
+                reason="test",
+                selection_center=5,
+            )
+        )
+
+        result = generate_adaptive_rate_plan(analysis, self.TIER1_RATES)
+
+        self.assertEqual(result.step, 1)
+        self.assertEqual(result.candidate_rates, tuple(range(1, 11)))
+        self.assertEqual(result.rates, (3, 4, 6, 7, 8, 9))
+
+    def test_uses_midpoint_of_guidellm_boundary_without_knee(self) -> None:
+        analysis = self._analysis(
+            SaturationAssessment(
+                status="oversaturation_boundary",
+                reason="test",
+                refinement_lower=75,
+                refinement_upper=100,
+            )
+        )
+
+        result = generate_adaptive_rate_plan(analysis, self.TIER1_RATES)
+
+        self.assertEqual(result.status, "ready")
+        self.assertEqual(result.selection_center, 87.5)
+        self.assertEqual(result.anchor, 90)
+
+    def test_aligns_fractional_knee_to_step_grid(self) -> None:
+        analysis = self._analysis(
+            SaturationAssessment(
+                status="throughput_only",
+                reason="test",
+                selection_center=113.5,
+            )
+        )
+
+        result = generate_adaptive_rate_plan(analysis, self.TIER1_RATES)
+
+        self.assertEqual(result.anchor, 115)
+        self.assertEqual(result.step, 5)
+        self.assertEqual(result.candidate_rates, tuple(range(90, 141, 5)))
+        self.assertNotIn(100, result.rates)
+
+    def test_skips_unsafe_assessment(self) -> None:
+        analysis = self._analysis(SaturationAssessment(status="disagreement", reason="test"))
+
+        result = generate_adaptive_rate_plan(analysis, self.TIER1_RATES)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.rates, ())
+
+    def test_skips_when_every_candidate_was_measured(self) -> None:
+        analysis = self._analysis(
+            SaturationAssessment(
+                status="throughput_only",
+                reason="test",
+                selection_center=5,
+            )
+        )
+
+        result = generate_adaptive_rate_plan(analysis, list(range(1, 11)))
+
+        self.assertEqual(result.status, "skipped")
+        self.assertEqual(result.excluded_tier1_rates, tuple(range(1, 11)))
+
+    def test_rejects_invalid_inputs(self) -> None:
+        analysis = self._analysis(
+            SaturationAssessment(
+                status="throughput_only",
+                reason="test",
+                selection_center=100,
+            )
+        )
+
+        with self.assertRaisesRegex(ValueError, "Tier 1 rates"):
+            generate_adaptive_rate_plan(analysis, [0])
+        with self.assertRaisesRegex(ValueError, "points_each_side"):
+            generate_adaptive_rate_plan(analysis, self.TIER1_RATES, points_each_side=0)
+
+
+class ConfigIQReportFileTests(unittest.TestCase):
+    def test_locates_and_analyzes_report_file(self) -> None:
+        report = {
+            "benchmarks": [
+                ConfigIQReportAnalysisTests._benchmark_with_throughput(1, 1, False),
+                ConfigIQReportAnalysisTests._benchmark_with_throughput(10, 10, False),
+                ConfigIQReportAnalysisTests._benchmark_with_throughput(20, 20, False),
+                ConfigIQReportAnalysisTests._benchmark_with_throughput(30, 30, False),
+                ConfigIQReportAnalysisTests._benchmark_with_throughput(40, 30, True),
+                ConfigIQReportAnalysisTests._benchmark_with_throughput(50, 30, True),
+                ConfigIQReportAnalysisTests._benchmark_with_throughput(60, 30, True),
+            ]
+        }
+        with TemporaryDirectory() as directory:
+            benchmark_dir = Path(directory)
+            report_path = (
+                benchmark_dir
+                / "001__run_guidellm_benchmark"
+                / "artifacts"
+                / "results"
+                / "benchmarks.json"
+            )
+            report_path.parent.mkdir(parents=True)
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            located_path = locate_guidellm_report(benchmark_dir)
+            analysis = analyze_guidellm_report_file(located_path)
+            artifact = build_saturation_analysis_artifact(
+                analysis,
+                tier1_report=str(located_path.relative_to(benchmark_dir)),
+                adaptive_rate_plan=AdaptiveRatePlan(status="ready", reason="test", rates=(35,)),
+                adaptive_report=("002__run_guidellm_benchmark/artifacts/results/benchmarks.json"),
+            )
+
+        self.assertEqual(located_path, report_path)
+        self.assertEqual(analysis.assessment.status, "corroborated")
+        self.assertEqual(artifact["schema_version"], 2)
+        self.assertEqual(
+            artifact["reports"]["tier1"],
+            "001__run_guidellm_benchmark/artifacts/results/benchmarks.json",
+        )
+        self.assertEqual(
+            artifact["reports"]["adaptive"],
+            "002__run_guidellm_benchmark/artifacts/results/benchmarks.json",
+        )
+        self.assertEqual(artifact["throughput"]["status"], "ok")
+        self.assertEqual(artifact["guidellm"]["status"], "detected")
+        self.assertEqual(artifact["assessment"]["status"], "corroborated")
+        self.assertEqual(artifact["adaptive_rate_plan"]["rates"], (35,))
+
+    def test_analysis_artifact_requires_tier1_report(self) -> None:
+        analysis = analyze_guidellm_report(
+            {
+                "benchmarks": [
+                    ConfigIQReportAnalysisTests._benchmark_with_throughput(1, 1, False),
+                    ConfigIQReportAnalysisTests._benchmark_with_throughput(10, 10, False),
+                    ConfigIQReportAnalysisTests._benchmark_with_throughput(20, 20, False),
+                    ConfigIQReportAnalysisTests._benchmark_with_throughput(30, 30, False),
+                    ConfigIQReportAnalysisTests._benchmark_with_throughput(40, 30, True),
+                ]
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "requires a Tier 1 report"):
+            build_saturation_analysis_artifact(
+                analysis,
+                tier1_report="",
+                adaptive_rate_plan=AdaptiveRatePlan(status="skipped", reason="test"),
+            )
+
+    def test_missing_report_raises(self) -> None:
+        with TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(FileNotFoundError, "No GuideLLM benchmarks.json"):
+                locate_guidellm_report(Path(directory))
+
+    def test_multiple_reports_raise(self) -> None:
+        with TemporaryDirectory() as directory:
+            benchmark_dir = Path(directory)
+            for index in (1, 2):
+                report_path = (
+                    benchmark_dir
+                    / f"{index:03d}__run_guidellm_benchmark"
+                    / "artifacts"
+                    / "results"
+                    / "benchmarks.json"
+                )
+                report_path.parent.mkdir(parents=True)
+                report_path.write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(RuntimeError, "Expected one"):
+                locate_guidellm_report(benchmark_dir)
 
 
 if __name__ == "__main__":
